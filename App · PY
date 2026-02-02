@@ -1,0 +1,750 @@
+"""
+Cata Risk Lab: Policy Auditor
+A Streamlit tool for auditing AI Use Policies
+Version 2.0 - Enhanced with better matching, recommendations, and export features
+"""
+
+import streamlit as st
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+import json
+import hashlib
+
+
+@dataclass
+class KeywordCheck:
+    keyword: str
+    found: bool
+    weight: int
+    category: str
+    variations: list = field(default_factory=list)
+    matched_text: Optional[str] = None
+    recommendation: str = ""
+
+
+# Keyword configuration with variations and recommendations
+KEYWORDS_CONFIG = [
+    {
+        "keyword": "liability",
+        "variations": ["liable", "liabilities", "indemnification", "indemnify"],
+        "weight": 15,
+        "category": "Legal Protection",
+        "recommendation": "Add clear liability clauses defining responsibility for AI-related harms and indemnification terms."
+    },
+    {
+        "keyword": "human review",
+        "variations": ["human oversight", "manual review", "human verification", "human approval"],
+        "weight": 15,
+        "category": "Oversight",
+        "recommendation": "Establish mandatory human review processes for high-stakes AI decisions."
+    },
+    {
+        "keyword": "data training",
+        "variations": ["training data", "model training", "training dataset", "training sets"],
+        "weight": 10,
+        "category": "Data Governance",
+        "recommendation": "Document data training practices including data sources, quality controls, and update procedures."
+    },
+    {
+        "keyword": "human-in-the-loop",
+        "variations": ["human in the loop", "hitl", "human intervention", "human control"],
+        "weight": 20,
+        "category": "Critical Safety",
+        "recommendation": "CRITICAL: Implement human-in-the-loop controls for all consequential AI decisions."
+    },
+    {
+        "keyword": "accountability",
+        "variations": ["accountable", "responsible party", "responsibility"],
+        "weight": 10,
+        "category": "Legal Protection",
+        "recommendation": "Define clear accountability structures and responsible parties for AI system outcomes."
+    },
+    {
+        "keyword": "transparency",
+        "variations": ["transparent", "explainability", "explainable", "interpretability"],
+        "weight": 10,
+        "category": "Ethics",
+        "recommendation": "Commit to transparency in AI decision-making and provide explanations for AI outputs."
+    },
+    {
+        "keyword": "bias",
+        "variations": ["fairness", "discrimination", "equitable", "equity", "unbiased"],
+        "weight": 8,
+        "category": "Fairness",
+        "recommendation": "Address bias detection, mitigation strategies, and fairness testing procedures."
+    },
+    {
+        "keyword": "audit",
+        "variations": ["auditing", "auditable", "audit trail", "audit log"],
+        "weight": 8,
+        "category": "Compliance",
+        "recommendation": "Establish regular AI audit procedures and maintain comprehensive audit trails."
+    },
+    {
+        "keyword": "consent",
+        "variations": ["informed consent", "user consent", "explicit consent", "opt-in", "opt-out"],
+        "weight": 7,
+        "category": "Privacy",
+        "recommendation": "Require informed consent for AI processing of personal data with clear opt-out mechanisms."
+    },
+    {
+        "keyword": "privacy",
+        "variations": ["data protection", "personal data", "pii", "personally identifiable"],
+        "weight": 7,
+        "category": "Privacy",
+        "recommendation": "Include comprehensive privacy protections aligned with GDPR/CCPA requirements."
+    },
+    {
+        "keyword": "security",
+        "variations": ["cybersecurity", "secure", "encryption", "access control"],
+        "weight": 5,
+        "category": "Security",
+        "recommendation": "Define security measures for AI systems including access controls and data encryption."
+    },
+    {
+        "keyword": "compliance",
+        "variations": ["regulatory", "regulation", "gdpr", "ccpa", "legal requirements"],
+        "weight": 5,
+        "category": "Compliance",
+        "recommendation": "Ensure alignment with relevant AI regulations (EU AI Act, NIST AI RMF, etc.)."
+    },
+    {
+        "keyword": "risk assessment",
+        "variations": ["risk analysis", "risk evaluation", "risk management", "risk mitigation"],
+        "weight": 10,
+        "category": "Risk Management",
+        "recommendation": "Conduct regular AI risk assessments and document mitigation strategies."
+    },
+    {
+        "keyword": "incident response",
+        "variations": ["incident management", "breach response", "failure protocol", "escalation"],
+        "weight": 8,
+        "category": "Risk Management",
+        "recommendation": "Establish incident response procedures for AI failures or unintended behaviors."
+    },
+    {
+        "keyword": "model governance",
+        "variations": ["ai governance", "model management", "lifecycle management", "model monitoring"],
+        "weight": 10,
+        "category": "Data Governance",
+        "recommendation": "Implement model governance framework covering the full AI lifecycle."
+    },
+    {
+        "keyword": "testing",
+        "variations": ["validation", "verification", "quality assurance", "qa", "evaluation"],
+        "weight": 7,
+        "category": "Compliance",
+        "recommendation": "Define rigorous testing and validation procedures before AI deployment."
+    },
+]
+
+
+def find_keyword_in_text(text: str, keyword: str, variations: list) -> tuple[bool, Optional[str]]:
+    """Find keyword or its variations in text, return match status and matched text."""
+    text_lower = text.lower()
+    
+    # Check main keyword
+    pattern = re.compile(r'\b' + re.escape(keyword.lower()) + r'\b', re.IGNORECASE)
+    match = pattern.search(text)
+    if match:
+        # Get context around the match
+        start = max(0, match.start() - 30)
+        end = min(len(text), match.end() + 30)
+        context = "..." + text[start:end] + "..."
+        return True, context
+    
+    # Check variations
+    for variation in variations:
+        pattern = re.compile(r'\b' + re.escape(variation.lower()) + r'\b', re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            start = max(0, match.start() - 30)
+            end = min(len(text), match.end() + 30)
+            context = "..." + text[start:end] + "..."
+            return True, context
+    
+    return False, None
+
+
+def analyze_policy(text: str) -> dict:
+    """Analyze the AI Use Policy text and return findings."""
+    
+    results = []
+    total_possible = sum(k["weight"] for k in KEYWORDS_CONFIG)
+    earned_points = 0
+    
+    for config in KEYWORDS_CONFIG:
+        found, matched_text = find_keyword_in_text(
+            text, 
+            config["keyword"], 
+            config["variations"]
+        )
+        
+        if found:
+            earned_points += config["weight"]
+        
+        results.append(KeywordCheck(
+            keyword=config["keyword"],
+            found=found,
+            weight=config["weight"],
+            category=config["category"],
+            variations=config["variations"],
+            matched_text=matched_text,
+            recommendation=config["recommendation"]
+        ))
+    
+    # Calculate base score (normalized to 100)
+    base_score = (earned_points / total_possible) * 100
+    
+    # Special penalty: Deduct additional points if 'Human-in-the-Loop' is missing
+    human_in_loop_check = next((r for r in results if r.keyword == "human-in-the-loop"), None)
+    penalty = 0
+    penalty_reasons = []
+    
+    if human_in_loop_check and not human_in_loop_check.found:
+        penalty += 15
+        penalty_reasons.append("Missing 'Human-in-the-Loop' provision (-15 pts)")
+    
+    # Additional penalty for missing critical safety items
+    critical_missing = sum(1 for r in results if r.category == "Critical Safety" and not r.found)
+    if critical_missing > 0:
+        additional_penalty = critical_missing * 5
+        penalty += additional_penalty
+        if additional_penalty > 0 and "Human-in-the-Loop" not in str(penalty_reasons):
+            penalty_reasons.append(f"Missing critical safety provisions (-{additional_penalty} pts)")
+    
+    final_score = max(0, min(100, base_score - penalty))
+    
+    # Calculate category scores
+    category_scores = {}
+    for result in results:
+        if result.category not in category_scores:
+            category_scores[result.category] = {"earned": 0, "possible": 0, "items": []}
+        category_scores[result.category]["possible"] += result.weight
+        if result.found:
+            category_scores[result.category]["earned"] += result.weight
+        category_scores[result.category]["items"].append(result)
+    
+    # Generate policy hash for certificate
+    policy_hash = hashlib.sha256(text.encode()).hexdigest()[:12].upper()
+    
+    return {
+        "results": results,
+        "base_score": round(base_score, 1),
+        "penalty": penalty,
+        "penalty_reasons": penalty_reasons,
+        "final_score": round(final_score, 1),
+        "earned_points": earned_points,
+        "total_possible": total_possible,
+        "category_scores": category_scores,
+        "policy_hash": policy_hash,
+        "audit_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "word_count": len(text.split()),
+    }
+
+
+def get_score_color(score: float) -> str:
+    """Return color based on score."""
+    if score >= 80:
+        return "#28a745"
+    elif score >= 60:
+        return "#ffc107"
+    elif score >= 40:
+        return "#fd7e14"
+    else:
+        return "#dc3545"
+
+
+def get_score_label(score: float) -> str:
+    """Return label based on score."""
+    if score >= 80:
+        return "✅ Excellent - Ready for Certification"
+    elif score >= 60:
+        return "⚠️ Good - Minor Improvements Needed"
+    elif score >= 40:
+        return "🔶 Fair - Significant Gaps Identified"
+    else:
+        return "🚨 High Risk - Major Revision Required"
+
+
+def get_risk_level(score: float) -> tuple[str, str]:
+    """Return risk level and description."""
+    if score >= 80:
+        return "LOW", "Policy demonstrates comprehensive AI governance"
+    elif score >= 60:
+        return "MODERATE", "Policy covers basics but lacks some safeguards"
+    elif score >= 40:
+        return "ELEVATED", "Policy has significant gaps in coverage"
+    else:
+        return "HIGH", "Policy requires substantial revision"
+
+
+def render_badge(policy_hash: str, timestamp: str, score: float):
+    """Render the certification badge."""
+    badge_html = f"""
+    <div style="
+        display: flex;
+        justify-content: center;
+        margin: 20px 0;
+    ">
+        <div style="
+            background: linear-gradient(135deg, #1a5f2a 0%, #28a745 50%, #1a5f2a 100%);
+            border: 3px solid #ffd700;
+            border-radius: 15px;
+            padding: 25px 45px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            position: relative;
+        ">
+            <div style="font-size: 45px; margin-bottom: 5px;">🛡️</div>
+            <div style="
+                color: #ffd700;
+                font-size: 14px;
+                font-weight: bold;
+                letter-spacing: 2px;
+                margin-bottom: 5px;
+            ">✓ CERTIFIED</div>
+            <div style="
+                color: white;
+                font-size: 20px;
+                font-weight: bold;
+            ">Cata Risk Lab</div>
+            <div style="
+                color: #90EE90;
+                font-size: 13px;
+                margin-top: 5px;
+            ">AI Policy Approved</div>
+            <div style="
+                color: #a0d8a0;
+                font-size: 11px;
+                margin-top: 10px;
+                border-top: 1px solid #4a8f4a;
+                padding-top: 10px;
+            ">
+                Score: {score}/100<br>
+                Certificate: #{policy_hash}<br>
+                {timestamp}
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(badge_html, unsafe_allow_html=True)
+
+
+def generate_report_text(analysis: dict, policy_text: str) -> str:
+    """Generate a text report for download."""
+    report = []
+    report.append("=" * 60)
+    report.append("CATA RISK LAB - AI POLICY AUDIT REPORT")
+    report.append("=" * 60)
+    report.append("")
+    report.append(f"Audit Date: {analysis['audit_timestamp']}")
+    report.append(f"Certificate ID: #{analysis['policy_hash']}")
+    report.append(f"Policy Word Count: {analysis['word_count']} words")
+    report.append("")
+    report.append("-" * 60)
+    report.append("SUMMARY")
+    report.append("-" * 60)
+    report.append(f"Final Safety Score: {analysis['final_score']}/100")
+    report.append(f"Risk Level: {get_risk_level(analysis['final_score'])[0]}")
+    report.append(f"Status: {'CERTIFIED' if analysis['final_score'] > 80 else 'NOT CERTIFIED'}")
+    report.append("")
+    
+    if analysis['penalty_reasons']:
+        report.append("Penalties Applied:")
+        for reason in analysis['penalty_reasons']:
+            report.append(f"  • {reason}")
+        report.append("")
+    
+    report.append("-" * 60)
+    report.append("CATEGORY BREAKDOWN")
+    report.append("-" * 60)
+    
+    for category, data in analysis['category_scores'].items():
+        pct = (data['earned'] / data['possible'] * 100) if data['possible'] > 0 else 0
+        report.append(f"\n{category}: {pct:.0f}% ({data['earned']}/{data['possible']} pts)")
+        for item in data['items']:
+            status = "✓ FOUND" if item.found else "✗ MISSING"
+            report.append(f"  [{status}] {item.keyword.title()} ({item.weight} pts)")
+    
+    report.append("")
+    report.append("-" * 60)
+    report.append("RECOMMENDATIONS")
+    report.append("-" * 60)
+    
+    missing_items = [r for r in analysis['results'] if not r.found]
+    if missing_items:
+        for item in sorted(missing_items, key=lambda x: x.weight, reverse=True):
+            report.append(f"\n• {item.keyword.title()} ({item.weight} pts)")
+            report.append(f"  {item.recommendation}")
+    else:
+        report.append("\nNo critical gaps identified. Policy is comprehensive.")
+    
+    report.append("")
+    report.append("=" * 60)
+    report.append("END OF REPORT")
+    report.append("=" * 60)
+    
+    return "\n".join(report)
+
+
+def get_sample_policy() -> str:
+    """Return a sample AI policy for testing."""
+    return """ACME Corporation AI Use Policy
+
+1. PURPOSE AND SCOPE
+This policy establishes guidelines for the responsible development and deployment of artificial intelligence systems at ACME Corporation.
+
+2. HUMAN OVERSIGHT
+All AI systems must incorporate human-in-the-loop controls for decisions affecting employees, customers, or business operations. Human review is required before any automated decision is finalized in high-stakes scenarios.
+
+3. DATA GOVERNANCE
+Training data must be documented, validated, and regularly audited. Data training processes must comply with privacy regulations and internal data governance standards. Model governance frameworks shall cover the entire AI lifecycle.
+
+4. ACCOUNTABILITY AND LIABILITY
+Clear accountability structures must be established for all AI systems. The AI Ethics Committee bears ultimate liability for AI-related outcomes. Responsible parties must be designated for each deployed system.
+
+5. TRANSPARENCY AND EXPLAINABILITY
+AI systems must provide explainable outputs where feasible. Transparency reports shall be published annually detailing AI system performance and incidents.
+
+6. FAIRNESS AND BIAS
+All AI systems must undergo bias testing before deployment. Fairness metrics must be monitored continuously. Discrimination in AI outputs is strictly prohibited.
+
+7. PRIVACY AND CONSENT
+Informed consent must be obtained for AI processing of personal data. Privacy protections must align with GDPR and CCPA requirements. Users must have clear opt-out mechanisms.
+
+8. SECURITY
+AI systems must implement appropriate security controls including encryption and access management. Cybersecurity assessments are required annually.
+
+9. COMPLIANCE AND AUDIT
+Regular compliance audits shall verify adherence to this policy and applicable regulations. Audit trails must be maintained for all AI decisions.
+
+10. RISK MANAGEMENT
+Risk assessments must be conducted before deploying new AI systems. Incident response procedures must be established for AI failures. Risk mitigation strategies shall be documented and reviewed quarterly.
+
+11. TESTING AND VALIDATION
+Rigorous testing and validation procedures are required before any AI system deployment. Quality assurance processes must verify system performance against defined metrics.
+
+Effective Date: January 1, 2024
+Last Updated: January 1, 2024
+"""
+
+
+def main():
+    st.set_page_config(
+        page_title="Cata Risk Lab: Policy Auditor",
+        page_icon="🛡️",
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
+    
+    # Custom CSS
+    st.markdown("""
+        <style>
+        .main-header {
+            text-align: center;
+            padding: 25px;
+            background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 50%, #1e4d6b 100%);
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .main-header h1 {
+            color: white;
+            margin: 0;
+            font-size: 2.2em;
+        }
+        .main-header p {
+            color: #a0c4e8;
+            margin: 8px 0 0 0;
+            font-size: 1.1em;
+        }
+        .keyword-found {
+            background-color: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 12px 15px;
+            margin: 8px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .keyword-missing {
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 12px 15px;
+            margin: 8px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .keyword-context {
+            font-size: 0.85em;
+            color: #666;
+            font-style: italic;
+            margin-top: 5px;
+        }
+        .score-card {
+            text-align: center;
+            padding: 30px;
+            border-radius: 15px;
+            margin: 20px 0;
+        }
+        .category-progress {
+            margin: 10px 0;
+        }
+        .risk-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .stTextArea textarea {
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Header
+    st.markdown("""
+        <div class="main-header">
+            <h1>🛡️ Cata Risk Lab: Policy Auditor</h1>
+            <p>Comprehensive AI Use Policy Analysis & Certification</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Main layout
+    col1, col2 = st.columns([1, 1], gap="large")
+    
+    with col1:
+        st.subheader("📄 AI Use Policy Input")
+        
+        # Sample policy button
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("📋 Load Sample Policy", use_container_width=True):
+                st.session_state['sample_loaded'] = True
+        with col_btn2:
+            if st.button("🗑️ Clear", use_container_width=True):
+                st.session_state['sample_loaded'] = False
+                st.session_state['policy_text'] = ""
+        
+        # Text area
+        default_text = get_sample_policy() if st.session_state.get('sample_loaded', False) else ""
+        policy_text = st.text_area(
+            "Paste your company's AI Use Policy below:",
+            value=default_text,
+            height=450,
+            placeholder="""Paste your AI Use Policy here...
+
+Your policy should address:
+• Human oversight and control mechanisms
+• Data governance and training practices  
+• Liability and accountability frameworks
+• Privacy and consent requirements
+• Bias and fairness considerations
+• Security and compliance measures
+• Risk management procedures
+
+Click 'Load Sample Policy' to see an example.""",
+            key="policy_input"
+        )
+        
+        analyze_button = st.button(
+            "🔍 Analyze Policy", 
+            type="primary", 
+            use_container_width=True,
+            disabled=not policy_text.strip()
+        )
+        
+        if policy_text.strip():
+            st.caption(f"📊 {len(policy_text.split())} words | {len(policy_text)} characters")
+    
+    with col2:
+        st.subheader("📊 Analysis Results")
+        
+        if analyze_button and policy_text.strip():
+            with st.spinner("Analyzing policy..."):
+                analysis = analyze_policy(policy_text)
+            
+            # Score display
+            score = analysis["final_score"]
+            score_color = get_score_color(score)
+            score_label = get_score_label(score)
+            risk_level, risk_desc = get_risk_level(score)
+            
+            # Risk level color
+            risk_colors = {
+                "LOW": "#28a745",
+                "MODERATE": "#ffc107", 
+                "ELEVATED": "#fd7e14",
+                "HIGH": "#dc3545"
+            }
+            
+            st.markdown(f"""
+                <div class="score-card" style="background: linear-gradient(135deg, {score_color}15, {score_color}30); border: 2px solid {score_color};">
+                    <div style="font-size: 72px; font-weight: bold; color: {score_color};">{score}</div>
+                    <div style="font-size: 18px; color: {score_color}; margin-bottom: 15px;">Safety Score / 100</div>
+                    <div style="font-size: 14px; color: #555;">{score_label}</div>
+                    <div style="margin-top: 15px;">
+                        <span class="risk-badge" style="background-color: {risk_colors[risk_level]}22; color: {risk_colors[risk_level]}; border: 1px solid {risk_colors[risk_level]};">
+                            Risk Level: {risk_level}
+                        </span>
+                    </div>
+                    <div style="font-size: 12px; color: #777; margin-top: 10px;">{risk_desc}</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Certification badge or warning
+            if score > 80:
+                render_badge(analysis['policy_hash'], analysis['audit_timestamp'], score)
+                st.success("🎉 This policy meets Cata Risk Lab certification standards!")
+            else:
+                st.warning(f"⚠️ Score must exceed 80 for certification. Current gap: {80 - score:.1f} points")
+            
+            # Penalty notices
+            if analysis["penalty_reasons"]:
+                for reason in analysis["penalty_reasons"]:
+                    st.error(f"🚨 **Penalty:** {reason}")
+            
+            # Category breakdown
+            st.markdown("---")
+            st.subheader("📈 Category Scores")
+            
+            for category, data in analysis['category_scores'].items():
+                pct = (data['earned'] / data['possible'] * 100) if data['possible'] > 0 else 0
+                col_cat, col_score = st.columns([3, 1])
+                with col_cat:
+                    st.progress(pct / 100, text=f"{category}")
+                with col_score:
+                    st.write(f"**{pct:.0f}%**")
+            
+            # Detailed findings
+            st.markdown("---")
+            st.subheader("🔎 Detailed Findings")
+            
+            tab1, tab2, tab3 = st.tabs(["✅ Found", "❌ Missing", "💡 Recommendations"])
+            
+            with tab1:
+                found_items = [r for r in analysis["results"] if r.found]
+                if found_items:
+                    for item in found_items:
+                        st.markdown(f"""
+                            <div class="keyword-found">
+                                <strong>✅ {item.keyword.title()}</strong>
+                                <span style="float: right; color: #28a745; font-weight: bold;">+{item.weight} pts</span>
+                                <div class="keyword-context">{item.matched_text if item.matched_text else ''}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("No keywords found in the policy.")
+            
+            with tab2:
+                missing_items = [r for r in analysis["results"] if not r.found]
+                if missing_items:
+                    for item in sorted(missing_items, key=lambda x: x.weight, reverse=True):
+                        st.markdown(f"""
+                            <div class="keyword-missing">
+                                <strong>❌ {item.keyword.title()}</strong>
+                                <span style="float: right; color: #dc3545;">0/{item.weight} pts</span>
+                                <div style="font-size: 0.85em; color: #856404; margin-top: 5px;">
+                                    Also checked: {', '.join(item.variations[:3])}...
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.success("🎉 All keywords found!")
+            
+            with tab3:
+                missing_items = [r for r in analysis["results"] if not r.found]
+                if missing_items:
+                    st.write("**Priority recommendations based on point value:**")
+                    for item in sorted(missing_items, key=lambda x: x.weight, reverse=True):
+                        with st.expander(f"📌 {item.keyword.title()} (+{item.weight} pts)", expanded=item.weight >= 15):
+                            st.write(item.recommendation)
+                            st.caption(f"Category: {item.category}")
+                else:
+                    st.success("Your policy is comprehensive! No critical recommendations.")
+            
+            # Summary metrics
+            st.markdown("---")
+            found_count = sum(1 for r in analysis["results"] if r.found)
+            total_count = len(analysis["results"])
+            
+            col_a, col_b, col_c, col_d = st.columns(4)
+            with col_a:
+                st.metric("Keywords Found", f"{found_count}/{total_count}")
+            with col_b:
+                st.metric("Points Earned", f"{analysis['earned_points']}/{analysis['total_possible']}")
+            with col_c:
+                st.metric("Penalties", f"-{analysis['penalty']}" if analysis['penalty'] > 0 else "None")
+            with col_d:
+                st.metric("Certificate", f"#{analysis['policy_hash'][:8]}")
+            
+            # Download report
+            st.markdown("---")
+            report_text = generate_report_text(analysis, policy_text)
+            
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    label="📥 Download Report (TXT)",
+                    data=report_text,
+                    file_name=f"policy_audit_{analysis['policy_hash']}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+            with col_dl2:
+                st.download_button(
+                    label="📥 Download Results (JSON)",
+                    data=json.dumps({
+                        "score": analysis["final_score"],
+                        "certificate": analysis["policy_hash"],
+                        "timestamp": analysis["audit_timestamp"],
+                        "certified": analysis["final_score"] > 80,
+                        "found_keywords": [r.keyword for r in analysis["results"] if r.found],
+                        "missing_keywords": [r.keyword for r in analysis["results"] if not r.found],
+                    }, indent=2),
+                    file_name=f"policy_audit_{analysis['policy_hash']}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+        
+        elif analyze_button:
+            st.warning("Please paste your AI Use Policy text to analyze.")
+        else:
+            st.info("👈 Paste your policy text and click 'Analyze Policy' to begin.")
+            
+            with st.expander("🎯 What We Analyze", expanded=True):
+                st.markdown("""
+                **16 Key Policy Areas** across 7 categories:
+                
+                | Category | Keywords Checked |
+                |----------|-----------------|
+                | 🛡️ Critical Safety | Human-in-the-Loop |
+                | ⚖️ Legal Protection | Liability, Accountability |
+                | 👁️ Oversight | Human Review |
+                | 📊 Data Governance | Data Training, Model Governance |
+                | 🔐 Privacy | Privacy, Consent |
+                | ✅ Compliance | Audit, Compliance, Testing |
+                | ⚠️ Risk Management | Risk Assessment, Incident Response |
+                | 🤝 Ethics & Fairness | Transparency, Bias |
+                | 🔒 Security | Security |
+                
+                **Scoring:**
+                - Each keyword has a weighted point value (5-20 pts)
+                - Missing "Human-in-the-Loop" incurs a 15-point penalty
+                - Score >80 qualifies for certification
+                """)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+        <div style="text-align: center; color: #666; padding: 20px;">
+            <p>🛡️ <strong>Cata Risk Lab Policy Auditor v2.0</strong></p>
+            <p style="font-size: 0.9em;">Helping organizations build safer, more responsible AI practices</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
